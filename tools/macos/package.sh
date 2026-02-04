@@ -199,6 +199,8 @@ cp "$BUILD_DIR/shell/casparcg" "$MACOS/"
 # Copy CEF framework
 echo "Copying CEF framework..."
 cp -R "$BUILD_DIR/Frameworks/Chromium Embedded Framework.framework" "$FRAMEWORKS/"
+# Fix read-only file permissions from CEF (causes issues with file transfer tools)
+find "$FRAMEWORKS/Chromium Embedded Framework.framework" -type f -perm 444 -exec chmod 644 {} \;
 
 # Copy config file (to both MacOS and Resources for flexibility)
 echo "Copying configuration..."

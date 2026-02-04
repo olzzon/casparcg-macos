@@ -236,7 +236,13 @@ Total: 43 passed, 1 failed
 ## Runtime Dependencies
 
 ### Required
-- **Vulkan SDK** (via MoltenVK) - for rendering
+
+```bash
+# Install Homebrew runtime dependencies
+brew install boost ffmpeg tbb
+
+# Install Vulkan SDK from https://vulkan.lunarg.com
+```
 
 ### Optional
 - **Blackmagic Desktop Video** - for DeckLink devices
