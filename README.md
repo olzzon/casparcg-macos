@@ -5,13 +5,13 @@ Thank you for your interest in CasparCG Server, a professional software used to
 play out and record professional graphics, audio and video to multiple outputs.
 CasparCG Server has been in 24/7 broadcast production since 2006.
 
-The CasparCG Server works on Windows and Linux.
+The CasparCG Server works on Windows, Linux, and macOS.
 
 System Requirements
 -------------------
 
-- A graphics card (GPU) capable of OpenGL 4.5 is required.
-- An Nvidia GPU is recommended, but other GPU's will likely work fine.
+- A graphics card (GPU) capable of OpenGL 4.5 (Windows/Linux) or Vulkan via MoltenVK (macOS) is required.
+- An Nvidia GPU is recommended on Windows/Linux, but other GPU's will likely work fine.
 - Intel and AMD CPU's have been tested and are known to work
 - PCIE bandwidth is important between your GPU and CPU, as well as Decklink and CPU. Avoid chipset lanes when possible.
 
@@ -23,6 +23,12 @@ System Requirements
 
  - Ubuntu 22.04 or 24.04 are recommended
  - Other distributions and releases will work but have not been tested
+
+### macOS
+
+ - macOS 10.15 (Catalina) or later is required
+ - Apple Silicon (M1/M2/M3) and Intel Macs are supported
+ - Uses Vulkan via MoltenVK for GPU rendering
 
 Getting Started
 ---------------
@@ -43,14 +49,49 @@ Getting Started
         fp_11.8.800.94_archive\11_8_r800_94\flashplayer11_8r800_94_winax.exe
 
 3. Configure the server by editing the self-documented "casparcg.config" file in
-   a text editor.
+   a text editor. See [Configuration Files and Folders](#configuration-files-and-folders) below for locations.
 
-4.
-   1. Windows: start `casparcg_auto_restart.bat`, or `casparcg.exe` and `scanner.exe` separately.
-   1. Linux: start the `run.sh` program or use tools/linux/start_docker.sh to run within docker (documentation is at the top of the file).
+4. Start the server:
+   - **Windows**: start `casparcg_auto_restart.bat`, or `casparcg.exe` and `scanner.exe` separately.
+   - **Linux**: start the `run.sh` program or use `tools/linux/start_docker.sh` to run within docker (documentation is at the top of the file).
+   - **macOS**: double-click `CasparCG.app` or run from terminal: `open CasparCG.app`
 
 5. Connect to the Server from a client software, such as the "CasparCG Client"
    which is available as a separate download.
+
+Configuration Files and Folders
+-------------------------------
+
+CasparCG Server searches for its configuration file (`casparcg.config`) in the following locations (in order):
+
+### Windows / Linux
+
+1. Path specified as command-line argument
+2. Current working directory
+3. Executable directory
+
+Default folder paths (configurable in `casparcg.config`):
+- **media/**: Media files (videos, images, audio)
+- **template/**: HTML and Flash templates
+- **data/**: Data files (datasets, thumbnails)
+- **log/**: Log files
+
+### macOS App Bundle
+
+When running the packaged `.app` bundle, CasparCG searches for configuration in:
+
+1. Path specified as command-line argument
+2. Current working directory
+3. `~/.config/CasparCG/` (user config directory)
+4. `CasparCG.app/Contents/Resources/` (bundled demo config)
+
+Demo folder paths for the app bundle:
+- **Media**: `CasparCG.app/Contents/MacOS/media/` or as configured
+- **Templates**: `CasparCG.app/Contents/MacOS/template/` or as configured
+- **Data**: `CasparCG.app/Contents/MacOS/data/` or as configured
+- **Logs**: `CasparCG.app/Contents/MacOS/log/`
+
+To customize the configuration for the app bundle, copy `casparcg.config` to `~/.config/CasparCG/` and edit it there.
 
 Documentation
 -------------

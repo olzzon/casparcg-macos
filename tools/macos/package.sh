@@ -203,12 +203,64 @@ cp -R "$BUILD_DIR/Frameworks/Chromium Embedded Framework.framework" "$FRAMEWORKS
 # Fix read-only file permissions from CEF (causes issues with file transfer tools)
 find "$FRAMEWORKS/Chromium Embedded Framework.framework" -type f -perm 444 -exec chmod 644 {} \;
 
-# Copy config file (to both MacOS and Resources for flexibility)
-echo "Copying configuration..."
-if [ -f "$BUILD_DIR/shell/casparcg.config" ]; then
-    cp "$BUILD_DIR/shell/casparcg.config" "$MACOS/"
-    cp "$BUILD_DIR/shell/casparcg.config" "$RESOURCES/"
-fi
+# Create default config file for app bundle with correct paths
+echo "Creating app bundle configuration..."
+cat > "$RESOURCES/casparcg.config" << 'CONFIGEOF'
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    CasparCG Server - macOS App Bundle Configuration
+
+    This is the default configuration for the macOS app bundle.
+
+    To customize, copy this file to ~/.config/CasparCG/casparcg.config
+    and edit it there. CasparCG will use your custom config if it exists.
+
+    Default paths (relative to the app bundle):
+      - Media:     CasparCG.app/Contents/MacOS/media/
+      - Templates: CasparCG.app/Contents/MacOS/template/
+      - Data:      CasparCG.app/Contents/MacOS/data/
+      - Logs:      CasparCG.app/Contents/MacOS/log/
+-->
+<configuration>
+    <paths>
+        <media-path>media/</media-path>
+        <log-path>log/</log-path>
+        <data-path>data/</data-path>
+        <template-path>template/</template-path>
+    </paths>
+
+    <lock-clear-phrase>secret</lock-clear-phrase>
+
+    <channels>
+        <channel>
+            <video-mode>1080p5000</video-mode>
+            <consumers>
+                <system-audio />
+                <screen>
+                    <device>1</device>
+                    <windowed>true</windowed>
+                </screen>
+            </consumers>
+        </channel>
+    </channels>
+
+    <controllers>
+        <tcp>
+            <port>5250</port>
+            <protocol>AMCP</protocol>
+        </tcp>
+    </controllers>
+
+    <osc>
+        <default-port>6250</default-port>
+        <disable-send-to-amcp-clients>false</disable-send-to-amcp-clients>
+        <predefined-clients />
+    </osc>
+</configuration>
+CONFIGEOF
+
+# Also copy to MacOS directory
+cp "$RESOURCES/casparcg.config" "$MACOS/"
 
 # Copy data files if they exist (excluding cache directories)
 if [ -d "$BUILD_DIR/shell/data" ]; then
@@ -512,6 +564,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTENTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+
+# Change to the MacOS directory so relative paths in config work correctly
+cd "$SCRIPT_DIR"
 
 # Set library paths for bundled dylibs
 export DYLD_LIBRARY_PATH="$FRAMEWORKS_DIR:$DYLD_LIBRARY_PATH"
