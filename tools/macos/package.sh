@@ -559,6 +559,7 @@ echo "Creating launcher script..."
 cat > "$MACOS/casparcg-launcher" << 'LAUNCHER'
 #!/bin/bash
 # CasparCG Launcher - Sets up environment for bundled libraries
+# Run this directly from terminal for headless/manual operation
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTENTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -584,6 +585,31 @@ exec "$SCRIPT_DIR/casparcg" "$@"
 LAUNCHER
 
 chmod +x "$MACOS/casparcg-launcher"
+
+# ============================================================================
+# Create Terminal-opening launcher for double-click from Finder
+# ============================================================================
+echo "Creating Terminal launcher for Finder..."
+
+cat > "$MACOS/CasparCG-Terminal" << 'TERMLAUNCHER'
+#!/bin/bash
+# CasparCG Terminal Launcher
+# This script opens Terminal.app and runs CasparCG inside it
+# Used when double-clicking the .app bundle from Finder
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LAUNCHER_PATH="$SCRIPT_DIR/casparcg-launcher"
+
+# Use osascript to open Terminal and run the launcher
+osascript <<EOF
+tell application "Terminal"
+    activate
+    do script "cd \"$SCRIPT_DIR\" && \"$LAUNCHER_PATH\"; exit"
+end tell
+EOF
+TERMLAUNCHER
+
+chmod +x "$MACOS/CasparCG-Terminal"
 
 # ============================================================================
 # Final pass: Fix all remaining library paths in all binaries
@@ -640,7 +666,7 @@ cat > "$CONTENTS/Info.plist" << EOF
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>casparcg-launcher</string>
+    <string>CasparCG-Terminal</string>
     <key>CFBundleIdentifier</key>
     <string>$BUNDLE_ID</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -740,10 +766,14 @@ if [ "$SIGN_APP" = false ]; then
     echo "  Ad-hoc signing main executable..."
     codesign --force --sign - "$MACOS/casparcg" 2>/dev/null || true
 
-    # Ad-hoc sign the launcher script (if it exists)
+    # Ad-hoc sign the launcher scripts (if they exist)
     if [ -f "$MACOS/casparcg-launcher" ]; then
-        echo "  Ad-hoc signing launcher..."
+        echo "  Ad-hoc signing casparcg-launcher..."
         codesign --force --sign - "$MACOS/casparcg-launcher" 2>/dev/null || true
+    fi
+    if [ -f "$MACOS/CasparCG-Terminal" ]; then
+        echo "  Ad-hoc signing CasparCG-Terminal..."
+        codesign --force --sign - "$MACOS/CasparCG-Terminal" 2>/dev/null || true
     fi
 fi
 
@@ -780,12 +810,18 @@ if [ "$SIGN_APP" = true ]; then
         --sign "$SIGNING_IDENTITY" \
         "$MACOS/casparcg"
 
-    # Sign launcher script if it exists
+    # Sign launcher scripts if they exist
     if [ -f "$MACOS/casparcg-launcher" ]; then
-        echo "  Signing launcher..."
+        echo "  Signing casparcg-launcher..."
         codesign --force --options runtime \
             --sign "$SIGNING_IDENTITY" \
             "$MACOS/casparcg-launcher"
+    fi
+    if [ -f "$MACOS/CasparCG-Terminal" ]; then
+        echo "  Signing CasparCG-Terminal..."
+        codesign --force --options runtime \
+            --sign "$SIGNING_IDENTITY" \
+            "$MACOS/CasparCG-Terminal"
     fi
 
     # Sign the bundle
@@ -885,8 +921,11 @@ if [ -n "$DMG_PATH" ]; then
     echo "DMG: $DMG_PATH"
 fi
 echo ""
-echo "To run the app:"
+echo "To run the app (opens in Terminal.app):"
 echo "  open $APP_BUNDLE"
 echo ""
-echo "Or from terminal:"
+echo "Or run directly from terminal (no Terminal.app window):"
+echo "  $APP_BUNDLE/Contents/MacOS/casparcg-launcher"
+echo ""
+echo "Or run the raw executable (requires environment setup):"
 echo "  $APP_BUNDLE/Contents/MacOS/casparcg"
