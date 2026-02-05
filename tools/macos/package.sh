@@ -257,7 +257,325 @@ if [ "$INCLUDE_NDI" = true ]; then
     fi
 fi
 
+# ============================================================================
+# Bundle all dynamic library dependencies
+# ============================================================================
+echo ""
+echo "Bundling dynamic library dependencies..."
+
+# Track which libraries we've already processed to avoid duplicates
+# Using a file instead of associative array for bash 3.x compatibility
+PROCESSED_LIBS_FILE=$(mktemp)
+trap "rm -f $PROCESSED_LIBS_FILE" EXIT
+
+# Function to check if a library has been processed
+is_lib_processed() {
+    local lib_name="$1"
+    grep -q "^${lib_name}$" "$PROCESSED_LIBS_FILE" 2>/dev/null
+}
+
+# Function to mark a library as processed
+mark_lib_processed() {
+    local lib_name="$1"
+    echo "$lib_name" >> "$PROCESSED_LIBS_FILE"
+}
+
+# Function to check if a library is a system library (should not be bundled)
+is_system_lib() {
+    local lib="$1"
+    # System libraries that should NOT be bundled
+    # Note: @rpath is NOT skipped - we need to resolve and bundle those
+    # Note: @loader_path is NOT skipped when processing framework libraries
+    if [[ "$lib" == /usr/lib/* ]] || \
+       [[ "$lib" == /System/* ]] || \
+       [[ "$lib" == @executable_path/* ]]; then
+        return 0  # true - is system lib
+    fi
+    return 1  # false - not system lib
+}
+
+# Function to resolve @rpath or @loader_path to actual path
+resolve_lib_path() {
+    local lib="$1"
+    local lib_name=$(basename "$lib")
+
+    # If it's an absolute path that exists, return it
+    if [[ "$lib" != @* ]] && [ -f "$lib" ]; then
+        echo "$lib"
+        return 0
+    fi
+
+    # If it's @rpath or @loader_path, search for the library
+    if [[ "$lib" == @rpath/* ]] || [[ "$lib" == @loader_path/* ]]; then
+        # Search in common Homebrew locations
+        local search_paths=(
+            "/opt/homebrew/lib"
+            "/opt/homebrew/opt/*/lib"
+            "/usr/local/lib"
+            "/usr/local/opt/*/lib"
+        )
+
+        for search_path in "${search_paths[@]}"; do
+            # Use glob expansion
+            for dir in $search_path; do
+                if [ -f "$dir/$lib_name" ]; then
+                    echo "$dir/$lib_name"
+                    return 0
+                fi
+            done
+        done
+    fi
+
+    # If it's a regular path, try to find it
+    if [ -f "$lib" ]; then
+        echo "$lib"
+        return 0
+    fi
+
+    # Not found
+    return 1
+}
+
+# Function to get the real path of a library (resolving symlinks)
+get_real_lib_path() {
+    local lib="$1"
+    if [ -L "$lib" ]; then
+        # Resolve symlink - use python3 as readlink -f doesn't work on macOS
+        python3 -c "import os; print(os.path.realpath('$lib'))" 2>/dev/null || echo "$lib"
+    else
+        echo "$lib"
+    fi
+}
+
+# Function to copy a library (without fixing paths - that happens later)
+copy_lib() {
+    local lib_path="$1"
+    local lib_name=$(basename "$lib_path")
+
+    # Skip if already processed
+    if is_lib_processed "$lib_name"; then
+        return 0
+    fi
+
+    # Skip system libraries
+    if is_system_lib "$lib_path"; then
+        return 0
+    fi
+
+    # Resolve @rpath or @loader_path to actual path
+    if [[ "$lib_path" == @rpath/* ]] || [[ "$lib_path" == @loader_path/* ]]; then
+        local resolved=$(resolve_lib_path "$lib_path")
+        if [ -n "$resolved" ]; then
+            lib_path="$resolved"
+        else
+            echo "  Warning: Could not resolve: $lib_path"
+            return 0
+        fi
+    fi
+
+    # Skip if file doesn't exist
+    if [ ! -f "$lib_path" ]; then
+        echo "  Warning: Library not found: $lib_path"
+        return 0
+    fi
+
+    # Get real path (resolve symlinks)
+    local real_path=$(get_real_lib_path "$lib_path")
+    local real_name=$(basename "$real_path")
+
+    # Mark as processed (both original name and real name)
+    mark_lib_processed "$lib_name"
+    mark_lib_processed "$real_name"
+
+    # Copy the library if not already in Frameworks
+    if [ ! -f "$FRAMEWORKS/$real_name" ]; then
+        echo "  Copying: $real_path"
+        cp "$real_path" "$FRAMEWORKS/"
+        chmod 755 "$FRAMEWORKS/$real_name"
+
+        # Also create symlink if original name differs
+        if [ "$lib_name" != "$real_name" ] && [ ! -e "$FRAMEWORKS/$lib_name" ]; then
+            ln -s "$real_name" "$FRAMEWORKS/$lib_name"
+        fi
+    fi
+
+    # Fix the install name of the copied library itself
+    install_name_tool -id "@executable_path/../Frameworks/$real_name" "$FRAMEWORKS/$real_name" 2>/dev/null || true
+
+    # Recursively discover and copy dependencies of this library
+    discover_dependencies "$FRAMEWORKS/$real_name"
+}
+
+# Function to discover all dependencies (copy phase only, no path fixing)
+discover_dependencies() {
+    local binary="$1"
+
+    # Get all linked libraries
+    local deps=$(otool -L "$binary" 2>/dev/null | tail -n +2 | awk '{print $1}')
+
+    for dep in $deps; do
+        # Skip system libraries
+        if is_system_lib "$dep"; then
+            continue
+        fi
+
+        # Copy the dependency if needed (recursive)
+        copy_lib "$dep"
+    done
+}
+
+# Phase 1: Discover and copy all dependencies (no path fixing yet)
+echo "Discovering and copying dependencies..."
+discover_dependencies "$MACOS/casparcg"
+
+# Also discover dependencies from any pre-existing libraries (CEF, NDI)
+for lib in "$FRAMEWORKS"/*.dylib; do
+    if [ -f "$lib" ] && [ ! -L "$lib" ]; then
+        discover_dependencies "$lib"
+    fi
+done
+
+# ============================================================================
+# Handle Vulkan ICD (Installable Client Driver) configuration
+# ============================================================================
+echo ""
+echo "Configuring Vulkan ICD..."
+
+# Find MoltenVK library - it's needed for Vulkan on macOS
+MOLTENVK_LIB=""
+MOLTENVK_ICD=""
+
+# Check common locations for MoltenVK
+# Homebrew on Apple Silicon
+if [ -f "/opt/homebrew/opt/molten-vk/lib/libMoltenVK.dylib" ]; then
+    MOLTENVK_LIB="/opt/homebrew/opt/molten-vk/lib/libMoltenVK.dylib"
+    # ICD is in etc/ not share/ for Homebrew
+    MOLTENVK_ICD="/opt/homebrew/opt/molten-vk/etc/vulkan/icd.d/MoltenVK_icd.json"
+# Homebrew on Intel
+elif [ -f "/usr/local/opt/molten-vk/lib/libMoltenVK.dylib" ]; then
+    MOLTENVK_LIB="/usr/local/opt/molten-vk/lib/libMoltenVK.dylib"
+    MOLTENVK_ICD="/usr/local/opt/molten-vk/etc/vulkan/icd.d/MoltenVK_icd.json"
+# LunarG Vulkan SDK
+elif [ -f "$HOME/VulkanSDK/latest/macOS/lib/libMoltenVK.dylib" ]; then
+    MOLTENVK_LIB="$HOME/VulkanSDK/latest/macOS/lib/libMoltenVK.dylib"
+    MOLTENVK_ICD="$HOME/VulkanSDK/latest/macOS/share/vulkan/icd.d/MoltenVK_icd.json"
+# Try to find anywhere
+else
+    # Search for library
+    MOLTENVK_LIB=$(find /opt/homebrew /usr/local -name "libMoltenVK.dylib" 2>/dev/null | head -1)
+    # Search for ICD JSON
+    MOLTENVK_ICD=$(find /opt/homebrew /usr/local -name "MoltenVK_icd.json" 2>/dev/null | head -1)
+fi
+
+if [ -n "$MOLTENVK_LIB" ] && [ -f "$MOLTENVK_LIB" ]; then
+    echo "  Found MoltenVK: $MOLTENVK_LIB"
+
+    # Copy MoltenVK library
+    if [ ! -f "$FRAMEWORKS/libMoltenVK.dylib" ]; then
+        cp "$MOLTENVK_LIB" "$FRAMEWORKS/"
+        chmod 755 "$FRAMEWORKS/libMoltenVK.dylib"
+        install_name_tool -id "@executable_path/../Frameworks/libMoltenVK.dylib" "$FRAMEWORKS/libMoltenVK.dylib" 2>/dev/null || true
+    fi
+
+    # Create vulkan ICD directory structure
+    mkdir -p "$RESOURCES/vulkan/icd.d"
+
+    # Create ICD JSON that points to our bundled MoltenVK
+    cat > "$RESOURCES/vulkan/icd.d/MoltenVK_icd.json" << 'ICDJSON'
+{
+    "file_format_version": "1.0.0",
+    "ICD": {
+        "library_path": "../../../Frameworks/libMoltenVK.dylib",
+        "api_version": "1.2.0"
+    }
+}
+ICDJSON
+    echo "  Created Vulkan ICD configuration"
+
+    # Discover MoltenVK dependencies
+    discover_dependencies "$FRAMEWORKS/libMoltenVK.dylib"
+else
+    echo "  Warning: MoltenVK not found. Vulkan may not work without it."
+    echo "  Install via: brew install molten-vk"
+fi
+
+# ============================================================================
+# Create wrapper script to set up Vulkan environment
+# ============================================================================
+echo "Creating launcher script..."
+
+cat > "$MACOS/casparcg-launcher" << 'LAUNCHER'
+#!/bin/bash
+# CasparCG Launcher - Sets up environment for bundled libraries
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONTENTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
+
+# Set library paths for bundled dylibs
+export DYLD_LIBRARY_PATH="$FRAMEWORKS_DIR:$DYLD_LIBRARY_PATH"
+export DYLD_FRAMEWORK_PATH="$FRAMEWORKS_DIR:$DYLD_FRAMEWORK_PATH"
+
+# Set Vulkan ICD path to use bundled MoltenVK
+export VK_ICD_FILENAMES="$RESOURCES_DIR/vulkan/icd.d/MoltenVK_icd.json"
+export VK_DRIVER_FILES="$RESOURCES_DIR/vulkan/icd.d/MoltenVK_icd.json"
+
+# Set NDI runtime directory
+export NDI_RUNTIME_DIR_V6="$FRAMEWORKS_DIR"
+
+# Launch CasparCG
+exec "$SCRIPT_DIR/casparcg" "$@"
+LAUNCHER
+
+chmod +x "$MACOS/casparcg-launcher"
+
+# ============================================================================
+# Final pass: Fix all remaining library paths in all binaries
+# ============================================================================
+echo ""
+echo "Final pass: fixing all library paths..."
+
+# Function to fix all Homebrew paths in a binary
+fix_all_lib_paths() {
+    local binary="$1"
+    local deps=$(otool -L "$binary" 2>/dev/null | tail -n +2 | awk '{print $1}')
+
+    for dep in $deps; do
+        # Skip if already using @executable_path or system path
+        if [[ "$dep" == @executable_path/* ]] || \
+           [[ "$dep" == /usr/lib/* ]] || \
+           [[ "$dep" == /System/* ]]; then
+            continue
+        fi
+
+        local dep_name=$(basename "$dep")
+
+        # Check if we have this library in Frameworks
+        if [ -f "$FRAMEWORKS/$dep_name" ] || [ -L "$FRAMEWORKS/$dep_name" ]; then
+            echo "  Fixing: $dep_name in $(basename "$binary")"
+            install_name_tool -change "$dep" "@executable_path/../Frameworks/$dep_name" "$binary" 2>/dev/null || true
+        fi
+    done
+}
+
+# Fix paths in main executable
+fix_all_lib_paths "$MACOS/casparcg"
+
+# Fix paths in all framework libraries
+for lib in "$FRAMEWORKS"/*.dylib; do
+    if [ -f "$lib" ] && [ ! -L "$lib" ]; then
+        fix_all_lib_paths "$lib"
+    fi
+done
+
+echo ""
+echo "Bundled libraries:"
+ls -la "$FRAMEWORKS"/*.dylib 2>/dev/null | awk '{print "  " $NF}' | xargs -I {} basename {} || true
+echo ""
+
 # Create Info.plist
+# Note: We use casparcg-launcher as the executable to set up library paths
 echo "Creating Info.plist..."
 cat > "$CONTENTS/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -267,7 +585,7 @@ cat > "$CONTENTS/Info.plist" << EOF
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>casparcg</string>
+    <string>casparcg-launcher</string>
     <key>CFBundleIdentifier</key>
     <string>$BUNDLE_ID</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -349,20 +667,29 @@ fi
 if [ "$SIGN_APP" = false ]; then
     echo "Ad-hoc signing bundled libraries..."
 
-    # Ad-hoc sign NDI if bundled
-    if [ "$INCLUDE_NDI" = true ] && [ -f "$FRAMEWORKS/libndi.dylib" ]; then
-        echo "  Ad-hoc signing NDI library..."
-        codesign --force --sign - "$FRAMEWORKS/libndi.dylib"
-    fi
+    # Ad-hoc sign all dylibs in Frameworks
+    for lib in "$FRAMEWORKS"/*.dylib; do
+        if [ -f "$lib" ]; then
+            echo "  Ad-hoc signing: $(basename "$lib")"
+            codesign --force --sign - "$lib" 2>/dev/null || true
+        fi
+    done
 
     # Ad-hoc sign CEF framework (required for dlopen)
-    echo "  Ad-hoc signing CEF framework..."
-    codesign --force --deep --sign - "$FRAMEWORKS/Chromium Embedded Framework.framework" 2>/dev/null || true
+    if [ -d "$FRAMEWORKS/Chromium Embedded Framework.framework" ]; then
+        echo "  Ad-hoc signing CEF framework..."
+        codesign --force --deep --sign - "$FRAMEWORKS/Chromium Embedded Framework.framework" 2>/dev/null || true
+    fi
 
     # Ad-hoc sign the main executable
-    # Note: May fail if there are non-code files in MacOS dir, but libraries are what matter
     echo "  Ad-hoc signing main executable..."
     codesign --force --sign - "$MACOS/casparcg" 2>/dev/null || true
+
+    # Ad-hoc sign the launcher script (if it exists)
+    if [ -f "$MACOS/casparcg-launcher" ]; then
+        echo "  Ad-hoc signing launcher..."
+        codesign --force --sign - "$MACOS/casparcg-launcher" 2>/dev/null || true
+    fi
 fi
 
 # Code signing
@@ -371,19 +698,24 @@ if [ "$SIGN_APP" = true ]; then
     echo "Signing app bundle..."
     echo "Identity: $SIGNING_IDENTITY"
 
-    # Sign frameworks first (inside-out signing)
-    echo "  Signing CEF framework..."
-    codesign --deep --force --options runtime \
-        --entitlements "$ENTITLEMENTS_FILE" \
-        --sign "$SIGNING_IDENTITY" \
-        "$FRAMEWORKS/Chromium Embedded Framework.framework"
+    # Sign all dylibs in Frameworks first (inside-out signing)
+    echo "  Signing bundled libraries..."
+    for lib in "$FRAMEWORKS"/*.dylib; do
+        if [ -f "$lib" ]; then
+            echo "    Signing: $(basename "$lib")"
+            codesign --force --options runtime \
+                --sign "$SIGNING_IDENTITY" \
+                "$lib"
+        fi
+    done
 
-    # Sign NDI if bundled
-    if [ "$INCLUDE_NDI" = true ] && [ -f "$FRAMEWORKS/libndi.dylib" ]; then
-        echo "  Signing NDI library..."
-        codesign --force --options runtime \
+    # Sign CEF framework
+    if [ -d "$FRAMEWORKS/Chromium Embedded Framework.framework" ]; then
+        echo "  Signing CEF framework..."
+        codesign --deep --force --options runtime \
+            --entitlements "$ENTITLEMENTS_FILE" \
             --sign "$SIGNING_IDENTITY" \
-            "$FRAMEWORKS/libndi.dylib"
+            "$FRAMEWORKS/Chromium Embedded Framework.framework"
     fi
 
     # Sign main executable
@@ -392,6 +724,14 @@ if [ "$SIGN_APP" = true ]; then
         --entitlements "$ENTITLEMENTS_FILE" \
         --sign "$SIGNING_IDENTITY" \
         "$MACOS/casparcg"
+
+    # Sign launcher script if it exists
+    if [ -f "$MACOS/casparcg-launcher" ]; then
+        echo "  Signing launcher..."
+        codesign --force --options runtime \
+            --sign "$SIGNING_IDENTITY" \
+            "$MACOS/casparcg-launcher"
+    fi
 
     # Sign the bundle
     echo "  Signing app bundle..."
