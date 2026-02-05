@@ -208,6 +208,10 @@ class renderer_application
 #ifdef __APPLE__
         // macOS: Use mock keychain to prevent "Chromium Safe Storage" keychain permission dialog
         command_line->AppendSwitch("use-mock-keychain");
+
+        // macOS: Run GPU thread in main process to avoid subprocess launch failures
+        // CEF's GPU subprocess can fail to launch on macOS due to signing/sandbox issues
+        command_line->AppendSwitch("in-process-gpu");
 #endif
 
         if (process_type.empty() && !enable_gpu_) {

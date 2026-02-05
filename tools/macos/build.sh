@@ -28,8 +28,8 @@ usage() {
     echo "  --no-html           Disable CEF/HTML module"
     echo ""
     echo "Packaging options:"
-    echo "  --package           Create .app bundle after build"
-    echo "  --include-ndi       Include NDI library in package"
+    echo "  --package           Create .app bundle after build (includes NDI by default)"
+    echo "  --no-ndi            Exclude NDI library from package"
     echo "  --dmg               Create DMG disk image"
     echo "  --sign              Sign the app bundle (requires --identity)"
     echo "  --identity \"...\"    Code signing identity"
@@ -41,8 +41,8 @@ usage() {
     echo "Examples:"
     echo "  $0                              # Build only"
     echo "  $0 --clean                      # Clean build"
-    echo "  $0 --package --dmg              # Build and create DMG"
-    echo "  $0 --package --include-ndi      # Build with NDI bundled"
+    echo "  $0 --package                    # Build and create app bundle with NDI"
+    echo "  $0 --package --no-ndi           # Build without NDI"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -71,8 +71,8 @@ while [[ $# -gt 0 ]]; do
             PACKAGE=1
             shift
             ;;
-        --include-ndi)
-            PACKAGE_ARGS="$PACKAGE_ARGS --include-ndi"
+        --no-ndi)
+            PACKAGE_ARGS="$PACKAGE_ARGS --no-ndi"
             shift
             ;;
         --dmg)

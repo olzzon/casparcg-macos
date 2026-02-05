@@ -42,7 +42,7 @@ else
 fi
 
 # Options
-INCLUDE_NDI=false
+INCLUDE_NDI=true
 CREATE_DMG=false
 SIGN_APP=false
 NOTARIZE=false
@@ -57,7 +57,8 @@ usage() {
     echo "Usage: $0 [options]"
     echo ""
     echo "Options:"
-    echo "  --include-ndi [path]     Include NDI library (optional: specify path to libndi.dylib)"
+    echo "  --no-ndi                 Exclude NDI library (included by default)"
+    echo "  --ndi-path [path]        Specify custom path to libndi.dylib"
     echo "  --dmg                    Create DMG disk image"
     echo "  --sign                   Sign the app bundle"
     echo "  --identity \"...\"         Code signing identity (Developer ID Application: ...)"
@@ -68,8 +69,9 @@ usage() {
     echo "  -h, --help               Show this help"
     echo ""
     echo "Examples:"
-    echo "  $0                                   # Create unsigned app bundle"
-    echo "  $0 --include-ndi --dmg              # Bundle NDI and create DMG"
+    echo "  $0                                   # Create app bundle with NDI"
+    echo "  $0 --no-ndi                         # Create app bundle without NDI"
+    echo "  $0 --dmg                            # Create DMG with NDI"
     echo "  $0 --sign --identity \"Developer ID Application: My Name (TEAMID)\""
     echo "  $0 --sign --notarize --identity \"...\" --apple-id \"...\" --team-id \"...\" --password \"@keychain:AC_PASSWORD\""
 }
@@ -77,14 +79,13 @@ usage() {
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --include-ndi)
-            INCLUDE_NDI=true
-            # Check if next argument is a path (not starting with -)
-            if [[ -n "$2" && ! "$2" =~ ^- ]]; then
-                NDI_LIB_PATH="$2"
-                shift
-            fi
+        --no-ndi)
+            INCLUDE_NDI=false
             shift
+            ;;
+        --ndi-path)
+            NDI_LIB_PATH="$2"
+            shift 2
             ;;
         --dmg)
             CREATE_DMG=true
@@ -341,6 +342,27 @@ install_name_tool -change \
 if [ "$INCLUDE_NDI" = true ] && [ -f "$FRAMEWORKS/libndi.dylib" ]; then
     # Update the install name of the NDI library itself
     install_name_tool -id "@executable_path/../Frameworks/libndi.dylib" "$FRAMEWORKS/libndi.dylib" 2>/dev/null || true
+fi
+
+# Ad-hoc sign bundled libraries if not doing formal signing
+# This is required on macOS because copied dylibs lose their valid signature
+if [ "$SIGN_APP" = false ]; then
+    echo "Ad-hoc signing bundled libraries..."
+
+    # Ad-hoc sign NDI if bundled
+    if [ "$INCLUDE_NDI" = true ] && [ -f "$FRAMEWORKS/libndi.dylib" ]; then
+        echo "  Ad-hoc signing NDI library..."
+        codesign --force --sign - "$FRAMEWORKS/libndi.dylib"
+    fi
+
+    # Ad-hoc sign CEF framework (required for dlopen)
+    echo "  Ad-hoc signing CEF framework..."
+    codesign --force --deep --sign - "$FRAMEWORKS/Chromium Embedded Framework.framework" 2>/dev/null || true
+
+    # Ad-hoc sign the main executable
+    # Note: May fail if there are non-code files in MacOS dir, but libraries are what matter
+    echo "  Ad-hoc signing main executable..."
+    codesign --force --sign - "$MACOS/casparcg" 2>/dev/null || true
 fi
 
 # Code signing
