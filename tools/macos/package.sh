@@ -22,6 +22,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# Load .env file if it exists
+if [ -f "$ROOT_DIR/.env" ]; then
+    echo "Loading configuration from .env file..."
+    # Export variables from .env (ignore comments and empty lines)
+    set -a
+    source "$ROOT_DIR/.env"
+    set +a
+fi
+
 # Configuration
 APP_NAME="CasparCG"
 BUNDLE_ID="com.casparcg.server"
@@ -41,15 +50,13 @@ else
     GIT_HASH="unknown"
 fi
 
-# Options
+# Options (use environment variables from .env as defaults)
 INCLUDE_NDI=true
 CREATE_DMG=false
 SIGN_APP=false
 NOTARIZE=false
-SIGNING_IDENTITY=""
-APPLE_ID=""
-TEAM_ID=""
-PASSWORD=""
+OPT_SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
+OPT_KEYCHAIN_PROFILE="${NOTARIZE_KEYCHAIN_PROFILE:-}"
 NDI_LIB_PATH=""
 
 # Print usage
@@ -62,18 +69,20 @@ usage() {
     echo "  --dmg                    Create DMG disk image"
     echo "  --sign                   Sign the app bundle"
     echo "  --identity \"...\"         Code signing identity (Developer ID Application: ...)"
-    echo "  --notarize               Notarize the app (requires --sign and Apple credentials)"
-    echo "  --apple-id \"...\"         Apple ID for notarization"
-    echo "  --team-id \"...\"          Team ID for notarization"
-    echo "  --password \"...\"         App-specific password or @keychain:name"
+    echo "  --notarize               Notarize the app (requires --sign and keychain profile)"
+    echo "  --keychain-profile \"...\" Keychain profile for notarization (from notarytool store-credentials)"
     echo "  -h, --help               Show this help"
+    echo ""
+    echo "Setup keychain profile (one-time):"
+    echo "  xcrun notarytool store-credentials \"CasparCG-Notarize\" \\"
+    echo "      --apple-id \"your@email.com\" --team-id \"TEAMID\" --password \"xxxx\""
     echo ""
     echo "Examples:"
     echo "  $0                                   # Create app bundle with NDI"
     echo "  $0 --no-ndi                         # Create app bundle without NDI"
     echo "  $0 --dmg                            # Create DMG with NDI"
     echo "  $0 --sign --identity \"Developer ID Application: My Name (TEAMID)\""
-    echo "  $0 --sign --notarize --identity \"...\" --apple-id \"...\" --team-id \"...\" --password \"@keychain:AC_PASSWORD\""
+    echo "  $0 --sign --notarize --dmg          # Uses .env for credentials"
 }
 
 # Parse arguments
@@ -96,23 +105,15 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --identity)
-            SIGNING_IDENTITY="$2"
+            OPT_SIGNING_IDENTITY="$2"
             shift 2
             ;;
         --notarize)
             NOTARIZE=true
             shift
             ;;
-        --apple-id)
-            APPLE_ID="$2"
-            shift 2
-            ;;
-        --team-id)
-            TEAM_ID="$2"
-            shift 2
-            ;;
-        --password)
-            PASSWORD="$2"
+        --keychain-profile)
+            OPT_KEYCHAIN_PROFILE="$2"
             shift 2
             ;;
         -h|--help)
@@ -128,8 +129,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate options
-if [ "$SIGN_APP" = true ] && [ -z "$SIGNING_IDENTITY" ]; then
-    echo "Error: --sign requires --identity"
+if [ "$SIGN_APP" = true ] && [ -z "$OPT_SIGNING_IDENTITY" ]; then
+    echo "Error: --sign requires --identity (or set SIGNING_IDENTITY in .env)"
     exit 1
 fi
 
@@ -138,8 +139,12 @@ if [ "$NOTARIZE" = true ]; then
         echo "Error: --notarize requires --sign"
         exit 1
     fi
-    if [ -z "$APPLE_ID" ] || [ -z "$TEAM_ID" ] || [ -z "$PASSWORD" ]; then
-        echo "Error: --notarize requires --apple-id, --team-id, and --password"
+    if [ -z "$OPT_KEYCHAIN_PROFILE" ]; then
+        echo "Error: --notarize requires keychain profile (set NOTARIZE_KEYCHAIN_PROFILE in .env or use --keychain-profile)"
+        echo ""
+        echo "Create a keychain profile with:"
+        echo "  xcrun notarytool store-credentials \"CasparCG-Notarize\" \\"
+        echo "      --apple-id \"your@email.com\" --team-id \"TEAMID\" --password \"xxxx\""
         exit 1
     fi
 fi
@@ -183,15 +188,12 @@ fi
 
 echo "Creating app bundle structure..."
 mkdir -p "$MACOS"
-mkdir -p "$MACOS/data"
-mkdir -p "$MACOS/media"
-mkdir -p "$MACOS/template"
-mkdir -p "$MACOS/log"
 mkdir -p "$FRAMEWORKS"
 mkdir -p "$RESOURCES"
 mkdir -p "$RESOURCES/data"
 mkdir -p "$RESOURCES/media"
 mkdir -p "$RESOURCES/template"
+mkdir -p "$RESOURCES/log"
 
 # Copy main executable
 echo "Copying executable..."
@@ -259,8 +261,7 @@ cat > "$RESOURCES/casparcg.config" << 'CONFIGEOF'
 </configuration>
 CONFIGEOF
 
-# Also copy to MacOS directory
-cp "$RESOURCES/casparcg.config" "$MACOS/"
+# Note: config is copied to ~/Library/Application Support/CasparCG/ at first launch
 
 # Copy data files if they exist (excluding cache directories)
 if [ -d "$BUILD_DIR/shell/data" ]; then
@@ -268,21 +269,22 @@ if [ -d "$BUILD_DIR/shell/data" ]; then
     rsync -a --exclude='cef_cache' --exclude='*.log' "$BUILD_DIR/shell/data/" "$RESOURCES/data/" 2>/dev/null || true
 fi
 
-# Copy media files if they exist (to MacOS dir where CasparCG expects them)
+# Copy media files to Resources only (MacOS dir uses symlinks to avoid signing issues)
 if [ -d "$BUILD_DIR/shell/media" ]; then
-    cp -R "$BUILD_DIR/shell/media/"* "$MACOS/media/" 2>/dev/null || true
     cp -R "$BUILD_DIR/shell/media/"* "$RESOURCES/media/" 2>/dev/null || true
 fi
 
-# Copy template files if they exist (to MacOS dir where CasparCG expects them)
+# Copy template files to Resources only
 if [ -d "$BUILD_DIR/shell/template" ]; then
-    cp -R "$BUILD_DIR/shell/template/"* "$MACOS/template/" 2>/dev/null || true
     cp -R "$BUILD_DIR/shell/template/"* "$RESOURCES/template/" 2>/dev/null || true
 fi
 
-# Copy font for OSD (if it exists) - needed in MacOS dir
+# Note: No symlinks created in MacOS directory.
+# The launcher script sets up a writable working directory at
+# ~/Library/Application Support/CasparCG/ with log/, data/, media/, template/
+
+# Copy font for OSD (if it exists) - to Resources only
 if [ -f "$BUILD_DIR/shell/LiberationMono-Regular.ttf" ]; then
-    cp "$BUILD_DIR/shell/LiberationMono-Regular.ttf" "$MACOS/"
     cp "$BUILD_DIR/shell/LiberationMono-Regular.ttf" "$RESOURCES/"
 fi
 
@@ -566,8 +568,31 @@ CONTENTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
-# Change to the MacOS directory so relative paths in config work correctly
-cd "$SCRIPT_DIR"
+# Set up writable working directory outside the signed app bundle
+WORK_DIR="$HOME/Library/Application Support/CasparCG"
+mkdir -p "$WORK_DIR/log"
+mkdir -p "$WORK_DIR/data"
+mkdir -p "$WORK_DIR/media"
+mkdir -p "$WORK_DIR/template"
+
+# Copy default config if user doesn't have one yet
+if [ ! -f "$WORK_DIR/casparcg.config" ]; then
+    cp "$RESOURCES_DIR/casparcg.config" "$WORK_DIR/casparcg.config"
+    echo "Created default config at: $WORK_DIR/casparcg.config"
+fi
+
+# Copy bundled media to working dir if media dir is empty
+if [ -z "$(ls -A "$WORK_DIR/media" 2>/dev/null)" ] && [ -d "$RESOURCES_DIR/media" ]; then
+    cp -R "$RESOURCES_DIR/media/"* "$WORK_DIR/media/" 2>/dev/null || true
+fi
+
+# Copy bundled templates to working dir if template dir is empty
+if [ -z "$(ls -A "$WORK_DIR/template" 2>/dev/null)" ] && [ -d "$RESOURCES_DIR/template" ]; then
+    cp -R "$RESOURCES_DIR/template/"* "$WORK_DIR/template/" 2>/dev/null || true
+fi
+
+# Change to writable working directory
+cd "$WORK_DIR"
 
 # Set library paths for bundled dylibs
 export DYLD_LIBRARY_PATH="$FRAMEWORKS_DIR:$DYLD_LIBRARY_PATH"
@@ -604,7 +629,7 @@ LAUNCHER_PATH="$SCRIPT_DIR/casparcg-launcher"
 osascript <<EOF
 tell application "Terminal"
     activate
-    do script "cd \"$SCRIPT_DIR\" && \"$LAUNCHER_PATH\"; exit"
+    do script "\"$LAUNCHER_PATH\"; exit"
 end tell
 EOF
 TERMLAUNCHER
@@ -781,60 +806,86 @@ fi
 if [ "$SIGN_APP" = true ]; then
     echo ""
     echo "Signing app bundle..."
-    echo "Identity: $SIGNING_IDENTITY"
+    echo "Identity: $OPT_SIGNING_IDENTITY"
 
     # Sign all dylibs in Frameworks first (inside-out signing)
     echo "  Signing bundled libraries..."
     for lib in "$FRAMEWORKS"/*.dylib; do
         if [ -f "$lib" ]; then
             echo "    Signing: $(basename "$lib")"
-            codesign --force --options runtime \
-                --sign "$SIGNING_IDENTITY" \
+            codesign --force --options runtime --timestamp \
+                --sign "$OPT_SIGNING_IDENTITY" \
                 "$lib"
         fi
     done
 
-    # Sign CEF framework
+    # Sign CEF framework (must sign nested libraries first)
     if [ -d "$FRAMEWORKS/Chromium Embedded Framework.framework" ]; then
+        echo "  Signing CEF framework libraries..."
+        # Sign all dylibs in Libraries subdirectory first
+        if [ -d "$FRAMEWORKS/Chromium Embedded Framework.framework/Libraries" ]; then
+            for lib in "$FRAMEWORKS/Chromium Embedded Framework.framework/Libraries"/*.dylib; do
+                if [ -f "$lib" ]; then
+                    echo "    Signing: $(basename "$lib")"
+                    codesign --force --options runtime --timestamp \
+                        --sign "$OPT_SIGNING_IDENTITY" \
+                        "$lib"
+                fi
+            done
+        fi
+        # Sign any helper apps
+        for helper in "$FRAMEWORKS/Chromium Embedded Framework.framework/Helpers"/*.app; do
+            if [ -d "$helper" ]; then
+                echo "    Signing: $(basename "$helper")"
+                codesign --force --options runtime --timestamp \
+                    --entitlements "$ENTITLEMENTS_FILE" \
+                    --sign "$OPT_SIGNING_IDENTITY" \
+                    "$helper"
+            fi
+        done
+        # Now sign the framework itself
         echo "  Signing CEF framework..."
-        codesign --deep --force --options runtime \
+        codesign --force --options runtime --timestamp \
             --entitlements "$ENTITLEMENTS_FILE" \
-            --sign "$SIGNING_IDENTITY" \
+            --sign "$OPT_SIGNING_IDENTITY" \
             "$FRAMEWORKS/Chromium Embedded Framework.framework"
     fi
 
     # Sign main executable
     echo "  Signing main executable..."
-    codesign --force --options runtime \
+    codesign --force --options runtime --timestamp \
         --entitlements "$ENTITLEMENTS_FILE" \
-        --sign "$SIGNING_IDENTITY" \
+        --sign "$OPT_SIGNING_IDENTITY" \
         "$MACOS/casparcg"
 
     # Sign launcher scripts if they exist
     if [ -f "$MACOS/casparcg-launcher" ]; then
         echo "  Signing casparcg-launcher..."
-        codesign --force --options runtime \
-            --sign "$SIGNING_IDENTITY" \
+        codesign --force --options runtime --timestamp \
+            --sign "$OPT_SIGNING_IDENTITY" \
             "$MACOS/casparcg-launcher"
     fi
     if [ -f "$MACOS/CasparCG-Terminal" ]; then
         echo "  Signing CasparCG-Terminal..."
-        codesign --force --options runtime \
-            --sign "$SIGNING_IDENTITY" \
+        codesign --force --options runtime --timestamp \
+            --sign "$OPT_SIGNING_IDENTITY" \
             "$MACOS/CasparCG-Terminal"
     fi
 
     # Sign the bundle
     echo "  Signing app bundle..."
-    codesign --force --options runtime \
+    codesign --force --options runtime --timestamp \
         --entitlements "$ENTITLEMENTS_FILE" \
-        --sign "$SIGNING_IDENTITY" \
+        --sign "$OPT_SIGNING_IDENTITY" \
         "$APP_BUNDLE"
 
     # Verify signature
     echo ""
-    echo "Verifying signature..."
-    codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+    echo "Verifying signatures..."
+    echo "  Main executable:"
+    codesign --verify --strict --verbose=2 "$MACOS/casparcg"
+    echo "  App bundle:"
+    codesign --verify --strict --verbose=2 "$APP_BUNDLE"
 
     echo ""
     echo "Checking Gatekeeper assessment..."
@@ -852,16 +903,26 @@ if [ "$CREATE_DMG" = true ]; then
     # Remove existing DMG
     rm -f "$DMG_PATH"
 
+    # Create staging directory with app and Applications symlink
+    DMG_STAGING="$OUTPUT_DIR/dmg-staging"
+    rm -rf "$DMG_STAGING"
+    mkdir -p "$DMG_STAGING"
+    cp -R "$APP_BUNDLE" "$DMG_STAGING/"
+    ln -s /Applications "$DMG_STAGING/Applications"
+
     # Create DMG
     hdiutil create -volname "$APP_NAME" \
-        -srcfolder "$APP_BUNDLE" \
+        -srcfolder "$DMG_STAGING" \
         -ov -format UDZO \
         "$DMG_PATH"
+
+    # Clean up staging
+    rm -rf "$DMG_STAGING"
 
     # Sign DMG if signing is enabled
     if [ "$SIGN_APP" = true ]; then
         echo "Signing DMG..."
-        codesign --force --sign "$SIGNING_IDENTITY" "$DMG_PATH"
+        codesign --force --timestamp --sign "$OPT_SIGNING_IDENTITY" "$DMG_PATH"
     fi
 
     echo "DMG created: $DMG_PATH"
@@ -885,9 +946,7 @@ if [ "$NOTARIZE" = true ]; then
 
     # Submit for notarization and wait
     xcrun notarytool submit "$NOTARIZE_PATH" \
-        --apple-id "$APPLE_ID" \
-        --team-id "$TEAM_ID" \
-        --password "$PASSWORD" \
+        --keychain-profile "$OPT_KEYCHAIN_PROFILE" \
         --wait
 
     # Staple the ticket
@@ -924,8 +983,11 @@ echo ""
 echo "To run the app (opens in Terminal.app):"
 echo "  open $APP_BUNDLE"
 echo ""
-echo "Or run directly from terminal (no Terminal.app window):"
+echo "Or run directly from terminal:"
 echo "  $APP_BUNDLE/Contents/MacOS/casparcg-launcher"
 echo ""
-echo "Or run the raw executable (requires environment setup):"
-echo "  $APP_BUNDLE/Contents/MacOS/casparcg"
+echo "Working directory: ~/Library/Application Support/CasparCG/"
+echo "  Config:    ~/Library/Application Support/CasparCG/casparcg.config"
+echo "  Media:     ~/Library/Application Support/CasparCG/media/"
+echo "  Templates: ~/Library/Application Support/CasparCG/template/"
+echo "  Logs:      ~/Library/Application Support/CasparCG/log/"

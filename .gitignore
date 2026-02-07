@@ -22,3 +22,6 @@ src/.idea
 
 # Ignore MacOS system files
 .DS_Store
+
+# Environment file with secrets
+.env
