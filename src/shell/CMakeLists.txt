@@ -23,6 +23,11 @@ if (MSVC)
 			shell.rc
 			windows_specific.cpp
 	)
+elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+	list(APPEND SOURCES
+			macos_specific.cpp
+			macos_main_loop.mm
+	)
 else ()
 	list(APPEND SOURCES
 			linux_specific.cpp
@@ -53,8 +58,11 @@ target_link_libraries(casparcg
 
 		TBB::tbb
 		TBB::tbbmalloc
-		GLEW::glew
 )
+
+IF(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+	target_link_libraries(casparcg GLEW::glew)
+ENDIF()
 
 if(ENABLE_VULKAN)
 	target_link_libraries(casparcg Vulkan::Vulkan)
@@ -79,6 +87,26 @@ if (MSVC)
 		swscale.lib
 		swresample.lib
 	)
+elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+	target_link_libraries(casparcg
+		${Boost_LIBRARIES}
+		${FFMPEG_LIBRARIES}
+		Apple::Frameworks
+		z
+		pthread
+	)
+	set_target_properties(casparcg PROPERTIES
+		INSTALL_RPATH "@executable_path/../Frameworks"
+		BUILD_WITH_INSTALL_RPATH TRUE
+	)
+	if (ENABLE_HTML AND DEFINED CEF_FRAMEWORK_PATH)
+		set(CEF_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/../Frameworks")
+		add_custom_command(TARGET casparcg POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E make_directory "${CEF_OUTPUT_DIR}"
+			COMMAND ${CMAKE_COMMAND} -E copy_directory "${CEF_FRAMEWORK_PATH}" "${CEF_OUTPUT_DIR}/Chromium Embedded Framework.framework"
+			COMMENT "Copying CEF framework to Frameworks directory"
+		)
+	endif()
 else ()
 	target_link_libraries(casparcg
 		${Boost_LIBRARIES}
