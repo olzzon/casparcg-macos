@@ -27,6 +27,8 @@ namespace caspar { namespace ffmpeg {
 std::shared_ptr<AVFrame>  alloc_frame();
 std::shared_ptr<AVPacket> alloc_packet();
 
+bool has_straight_alpha(AVPixelFormat pix_fmt);
+
 core::pixel_format_desc pixel_format_desc(AVPixelFormat     pix_fmt,
                                           int               width,
                                           int               height,

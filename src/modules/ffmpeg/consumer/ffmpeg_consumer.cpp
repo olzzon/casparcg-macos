@@ -62,6 +62,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/samplefmt.h>
 }
@@ -207,30 +208,65 @@ struct Stream
         }
 
         if (codec->type == AVMEDIA_TYPE_VIDEO) {
+#if LIBAVFILTER_VERSION_MAJOR >= 10
+            // FFmpeg 7+: pixel_formats is an array option (comma-separated)
+            {
+                std::string pix_fmt_str;
+                for (auto p = codec->pix_fmts; p && *p != -1; ++p) {
+                    if (!pix_fmt_str.empty()) pix_fmt_str += ",";
+                    pix_fmt_str += av_get_pix_fmt_name(static_cast<AVPixelFormat>(*p));
+                }
+                std::string args = "pixel_formats=" + pix_fmt_str;
+                FF(avfilter_graph_create_filter(
+                    &sink, avfilter_get_by_name("buffersink"), "out", args.c_str(), nullptr, graph.get()));
+            }
+#else
             FF(avfilter_graph_create_filter(
                 &sink, avfilter_get_by_name("buffersink"), "out", nullptr, nullptr, graph.get()));
-
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4245)
 #endif
-            // TODO codec->profiles
-            // TODO FF(av_opt_set_int_list(sink, "framerates", codec->supported_framerates, { 0, 0 },
-            // AV_OPT_SEARCH_CHILDREN));
             FF(av_opt_set_int_list(sink, "pix_fmts", codec->pix_fmts, -1, AV_OPT_SEARCH_CHILDREN));
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+#endif
         } else if (codec->type == AVMEDIA_TYPE_AUDIO) {
+#if LIBAVFILTER_VERSION_MAJOR >= 10
+            // FFmpeg 7+: sample_formats/samplerates are array options (comma-separated)
+            {
+                std::string args;
+                std::string sample_fmt_str;
+                for (auto p = codec->sample_fmts; p && *p != -1; ++p) {
+                    if (!sample_fmt_str.empty()) sample_fmt_str += ",";
+                    sample_fmt_str += av_get_sample_fmt_name(static_cast<AVSampleFormat>(*p));
+                }
+                args = "sample_formats=" + sample_fmt_str;
+                if (codec->supported_samplerates && codec->supported_samplerates[0]) {
+                    std::string sr_str;
+                    for (auto p = codec->supported_samplerates; *p; ++p) {
+                        if (!sr_str.empty()) sr_str += ",";
+                        sr_str += std::to_string(*p);
+                    }
+                    args += ":samplerates=" + sr_str;
+                }
+                FF(avfilter_graph_create_filter(
+                    &sink, avfilter_get_by_name("abuffersink"), "out", args.c_str(), nullptr, graph.get()));
+            }
+#else
             FF(avfilter_graph_create_filter(
                 &sink, avfilter_get_by_name("abuffersink"), "out", nullptr, nullptr, graph.get()));
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4245)
 #endif
-            // TODO codec->profiles
             FF(av_opt_set_int_list(sink, "sample_fmts", codec->sample_fmts, -1, AV_OPT_SEARCH_CHILDREN));
             FF(av_opt_set_int_list(sink, "sample_rates", codec->supported_samplerates, 0, AV_OPT_SEARCH_CHILDREN));
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+#endif
 
 #if FFMPEG_NEW_CHANNEL_LAYOUT
             // TODO: need to translate codec->ch_layouts into something that can be passed via av_opt_set_*

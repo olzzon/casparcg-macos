@@ -40,6 +40,7 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/samplefmt.h>
 }
@@ -547,13 +548,6 @@ struct Filter
         }
 
         if (media_type == AVMEDIA_TYPE_VIDEO) {
-            FF(avfilter_graph_create_filter(
-                &sink, avfilter_get_by_name("buffersink"), "out", nullptr, nullptr, graph.get()));
-
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4245)
-#endif
             const AVPixelFormat pix_fmts[] = {AV_PIX_FMT_RGB24,
                                               AV_PIX_FMT_BGR24,
                                               AV_PIX_FMT_BGRA,
@@ -571,8 +565,13 @@ struct Filter
                                               AV_PIX_FMT_YUV420P12,
                                               AV_PIX_FMT_YUV410P,
                                               AV_PIX_FMT_YUVA444P,
+                                              AV_PIX_FMT_YUVA444P10,
+                                              AV_PIX_FMT_YUVA444P12,
                                               AV_PIX_FMT_YUVA422P,
+                                              AV_PIX_FMT_YUVA422P10,
+                                              AV_PIX_FMT_YUVA422P12,
                                               AV_PIX_FMT_YUVA420P,
+                                              AV_PIX_FMT_YUVA420P10,
                                               AV_PIX_FMT_UYVY422,
                                               // bwdif needs planar rgb
                                               AV_PIX_FMT_GBRP,
@@ -582,27 +581,54 @@ struct Filter
                                               AV_PIX_FMT_GBRAP,
                                               AV_PIX_FMT_GBRAP16,
                                               AV_PIX_FMT_NONE};
+#if LIBAVFILTER_VERSION_MAJOR >= 10
+            {
+                // FFmpeg 7+: pixel_formats is an array option (comma-separated)
+                std::string pix_fmt_str;
+                for (auto p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
+                    if (!pix_fmt_str.empty()) pix_fmt_str += ",";
+                    pix_fmt_str += av_get_pix_fmt_name(*p);
+                }
+                std::string args = "pixel_formats=" + pix_fmt_str;
+                FF(avfilter_graph_create_filter(
+                    &sink, avfilter_get_by_name("buffersink"), "out", args.c_str(), nullptr, graph.get()));
+            }
+#else
+            FF(avfilter_graph_create_filter(
+                &sink, avfilter_get_by_name("buffersink"), "out", nullptr, nullptr, graph.get()));
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4245)
+#endif
             FF(av_opt_set_int_list(sink, "pix_fmts", pix_fmts, -1, AV_OPT_SEARCH_CHILDREN));
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+#endif
         } else if (media_type == AVMEDIA_TYPE_AUDIO) {
+#if LIBAVFILTER_VERSION_MAJOR >= 10
+            {
+                // FFmpeg 7+: pass sample formats and rates as init args
+                std::string args = "sample_formats=" + std::string(av_get_sample_fmt_name(AV_SAMPLE_FMT_S32));
+                args += ":samplerates=" + std::to_string(format_desc.audio_sample_rate);
+                FF(avfilter_graph_create_filter(
+                    &sink, avfilter_get_by_name("abuffersink"), "out", args.c_str(), nullptr, graph.get()));
+            }
+#else
             FF(avfilter_graph_create_filter(
                 &sink, avfilter_get_by_name("abuffersink"), "out", nullptr, nullptr, graph.get()));
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4245)
 #endif
-            const AVSampleFormat sample_fmts[] = {AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_NONE};
-            FF(av_opt_set_int_list(sink, "sample_fmts", sample_fmts, -1, AV_OPT_SEARCH_CHILDREN));
-
-            FF(av_opt_set_int(sink, "all_channel_counts", 1, AV_OPT_SEARCH_CHILDREN));
-
-            const int sample_rates[] = {format_desc.audio_sample_rate, -1};
-            FF(av_opt_set_int_list(sink, "sample_rates", sample_rates, -1, AV_OPT_SEARCH_CHILDREN));
+            FF(av_opt_set_int_list(sink, "sample_fmts", (const AVSampleFormat[]){AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_NONE}, -1, AV_OPT_SEARCH_CHILDREN));
+            FF(av_opt_set_int_list(sink, "sample_rates", (const int[]){format_desc.audio_sample_rate, -1}, -1, AV_OPT_SEARCH_CHILDREN));
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+#endif
+
+            FF(av_opt_set_int(sink, "all_channel_counts", 1, AV_OPT_SEARCH_CHILDREN));
         } else {
             CASPAR_THROW_EXCEPTION(ffmpeg_error_t()
                                    << boost::errinfo_errno(EINVAL) << msg_info_t("invalid output media type"));
@@ -937,8 +963,14 @@ struct AVProducer::Impl
                 frame.duration   = av_rescale_q(frame.audio->nb_samples, {1, sr}, TIME_BASE_Q);
             }
 
+            // Detect if video has straight alpha (ProRes 4444, DNxHR, etc.)
+            bool is_straight_alpha = false;
+            if (frame.video) {
+                is_straight_alpha = has_straight_alpha(static_cast<AVPixelFormat>(frame.video->format));
+            }
+
             frame.frame = core::draw_frame(
-                make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video), scale_mode_));
+                make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video), scale_mode_, is_straight_alpha));
             frame.frame_count = frame_count_++;
 
             graph_->set_value("decode-time", decode_timer.elapsed() * format_desc_.fps * 0.5);
