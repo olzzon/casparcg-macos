@@ -609,8 +609,10 @@ struct Filter
 #if LIBAVFILTER_VERSION_MAJOR >= 10
             {
                 // FFmpeg 7+: pass sample formats and rates as init args
+                // all_channel_counts must also be in init args (non-runtime option)
                 std::string args = "sample_formats=" + std::string(av_get_sample_fmt_name(AV_SAMPLE_FMT_S32));
                 args += ":samplerates=" + std::to_string(format_desc.audio_sample_rate);
+                args += ":all_channel_counts=1";
                 FF(avfilter_graph_create_filter(
                     &sink, avfilter_get_by_name("abuffersink"), "out", args.c_str(), nullptr, graph.get()));
             }
@@ -626,9 +628,9 @@ struct Filter
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
-#endif
 
             FF(av_opt_set_int(sink, "all_channel_counts", 1, AV_OPT_SEARCH_CHILDREN));
+#endif
         } else {
             CASPAR_THROW_EXCEPTION(ffmpeg_error_t()
                                    << boost::errinfo_errno(EINVAL) << msg_info_t("invalid output media type"));
